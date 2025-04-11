@@ -3,6 +3,7 @@ from mqtt_as import MQTTClient, config
 from compat import wifi_led, blue_led
 import uasyncio as asyncio
 import machine
+import re
 import time
 from secrets import (
     WIFI_SSID,
@@ -16,7 +17,7 @@ from secrets import (
 
 
 # Global text scaling factor (adjust this to change text size)
-TEXT_SCALE = 1
+TEXT_SCALE = 2
 
 # Global screen speed factor: increase to slow down scrolling, decrease to speed up.
 GLOBAL_SCREEN_SPEED = 0.5
@@ -54,8 +55,8 @@ i75 = Interstate75(display=Interstate75.DISPLAY_INTERSTATE75_128X128)
 graphics = i75.display
 width = i75.width
 height = i75.height
-print(1)
 
+print("DISPLAY")
 
 # Function to scale colors based on brightness
 def scale_color(color, brightness):
@@ -124,111 +125,190 @@ def draw_text_with_outline_multiline(
         graphics.text(line, x, y_offset, -1, scale)
 
 
+def _parse_rect(parts):
+    """
+    Attempts to parse RECT (X Y WIDTH HEIGHT) from the beginning of a list of parts.
+
+    Args:
+        parts: A list of string parts from the MQTT message parameters.
+
+    Returns:
+        A tuple containing:
+        - A dictionary representing the RECT if parsing is successful, else None.
+        - The remaining list of parts after consuming the RECT components.
+        If parsing fails (not enough parts or non-integer values), returns (None, original_parts).
+    """
+    if len(parts) < 4:
+        return None, parts  # Not enough parts for RECT
+
+    try:
+        x = int(parts[0])
+        y = int(parts[1])
+        width = int(parts[2])
+        height = int(parts[3])
+        rect = {'x': x, 'y': y, 'width': width, 'height': height}
+        return rect, parts[4:]
+    except ValueError:
+        return None, parts # Non-integer value found where integer expected
+
+
+def _parse_style(style_string):
+    """
+    Parses a STYLE string (comma-delimited key=value pairs).
+
+    Args:
+        style_string: The string containing style information (e.g., "font=1,color=#ff0000").
+
+    Returns:
+        A dictionary of parsed style keys and values. Invalid pairs are ignored.
+    """
+    style_dict: Dict[str, str] = {}
+    if not style_string:
+        return style_dict
+
+    pairs = style_string.split(',')
+    for pair in pairs:
+        pair = pair.strip()
+        if '=' in pair:
+            key, value = pair.split('=', 1) # Split only on the first '='
+            key = key.strip()
+            value = value.strip()
+            if key: # Ensure key is not empty
+                style_dict[key] = value
+        # Silently ignore parts without '=' or empty keys
+    return style_dict
+
+# --- Main Parsing Function ---
+
+def parse_mqtt_message(message):
+    """
+    Parses an MQTT message string according to the defined protocol.
+
+    Args:
+        message: The raw MQTT message payload string.
+
+    Returns:
+        A dictionary containing the parsed structure ('namespace', 'command', 'params')
+        if parsing is successful.
+        Returns None if the message format is invalid or violates the protocol.
+    """
+    if not message:
+        print("Error: Empty message received.")
+        return None
+
+    parts = message.strip().split()
+
+    if len(parts) < 2:
+        print(f"Error: Message too short. Expected '<NAMESPACE> <COMMAND> ...', got '{message}'")
+        return None
+
+    print(parts)
+    namespace = parts[0].lower()
+    command = parts[1].lower()
+    param_parts = parts[2:]
+    print(param_parts)
+    
+    # --- Validate Namespace and Command ---
+    if namespace != "display":
+        print(f"Error: Unknown namespace '{parts[0]}'. Expected 'display'.")
+        return None
+
+    parsed_data = {
+        "namespace": namespace,
+        "command": command,
+        "params": {}
+    }
+
+    # --- Command-Specific Parsing ---
+    if command == "clear":
+        if remaining_params_str.strip():
+            print(f"Error: Command 'clear' does not accept parameters, got '{remaining_params_str}'")
+            return None
+        # No parameters needed for clear
+        return parsed_data
+
+    elif command == "rect":
+        # Expected structure: display rect [RECT] [STYLE]
+        rect_data, remaining_parts = _parse_rect(param_parts)
+        print(param_parts)
+
+        if rect_data is None:
+            print(f"Error: Invalid RECT format in 'rect' command. "
+                  f"Expected 'X Y WIDTH HEIGHT', got parameters starting with: '{' '.join(param_parts[:4])}'")
+            return None
+
+        parsed_data["params"]["rect"] = rect_data
+
+        # The rest should be the STYLE string
+        style_string = " ".join(remaining_parts)
+        parsed_data["params"]["style"] = _parse_style(style_string)
+
+        return parsed_data
+
+    elif command == "text":
+        # Expected structure: display text [RECT] [STYLE] [CONTENT]
+        rect_data, remaining_parts_after_rect = _parse_rect(param_parts)
+
+        if rect_data is None:
+            print(f"Error: Invalid RECT format in 'text' command. "
+                  f"Expected 'X Y WIDTH HEIGHT', got parameters starting with: '{' '.join(param_parts[:4])}'")
+            return None
+
+        parsed_data["params"]["rect"] = rect_data
+
+        # Now separate STYLE and CONTENT
+        style_parts = []
+        content_parts = []
+        parsing_style = True
+
+        for i, part in enumerate(remaining_parts_after_rect):
+            # Style parts must contain '=' and come before any non-style part
+            # If we encounter a part without '=' it must be the start of content.
+            if parsing_style and '=' in part:
+                 # Basic check: does it look like key=value? Allow '=' within value.
+                 # More robust check could use regex if needed: re.match(r"^[a-zA-Z0-9_]+=.*", part)
+                 if part.index('=') > 0: # Ensure '=' is not the first character
+                    style_parts.append(part)
+                 else: # Part starts with '=', assume it's content
+                     parsing_style = False
+                     content_parts.append(part)
+            else:
+                parsing_style = False
+                content_parts.append(part)
+
+        # Reconstruct style string (comma separated) and content string (space separated)
+        style_string = ",".join(style_parts) # Already split by space, now join with comma for parser
+        content_string = " ".join(content_parts)
+
+        parsed_data["params"]["style"] = _parse_style(style_string)
+        parsed_data["params"]["content"] = content_string
+
+        return parsed_data
+
+    else:
+        print(f"Error: Unknown command '{command}' for namespace '{namespace}'.")
+        return None
+
+
 # --------------------- MQTT Message and Scrolling ---------------------
 def sub_cb(topic, msg, retained):
     global STATE_PRE_SCROLL, STATE_SCROLLING, STATE_POST_SCROLL, STATE_BLANK_SCREEN, width, height
     print(f'Topic: "{topic.decode()}" Message: "{msg.decode()}" Retained: {retained}')
-    state = STATE_PRE_SCROLL
-    scroll = 0
-    DATA = msg.decode("utf-8")
-    # Add spaces before and after message so it scrolls cleanly
-    MESSAGE = "     " + DATA + "     "
-
-    # Wrap text: split MESSAGE into words and build lines that fit on screen.
-    words = MESSAGE.split()
-    lines = []
-    current_line = ""
-    # Use the global TEXT_SCALE in measuring text width.
-    for word in words:
-        if graphics.measure_text(
-            (current_line + " " + word).strip(), TEXT_SCALE
-        ) <= width - 2 * (BUFFER_PIXELS + 1):
-            current_line = (current_line + " " + word).strip()
-        else:
-            lines.append(current_line)
-            current_line = word
-    if current_line:
-        lines.append(current_line)
-    # Join lines into a multi-line string (separated by newline).
-    message_lines = "\n".join(lines)
-    num_lines = len(lines)
-    # Calculate scaled line height from the font height (assumed 8 for bitmap8)
-    line_height = 8 * TEXT_SCALE
-
-    # Compute total scroll distance: text height plus extra buffer
-    total_scroll = num_lines * line_height + height + BUFFER_PIXELS + 1
-    mid_pause_done = False
-    last_time = time.ticks_ms()
-
-    while True:
-        time_ms = time.ticks_ms()
-
-        # Transition from pre-scroll (hold) to scrolling
-        if state == STATE_PRE_SCROLL and time_ms - last_time > HOLD_TIME * 1000:
-            state = STATE_SCROLLING
-            last_time = time_ms
-
-        # When scrolling, move the text by SCROLL_STEP when enough time has elapsed
-        if state == STATE_SCROLLING and time_ms - last_time > SCROLL_DELAY * 1000:
-            scroll += SCROLL_STEP
-
-            # Add a mid-scroll pause for 5 seconds once halfway through
-            if not mid_pause_done and scroll >= total_scroll // 2:
-                print("Pausing mid-scroll for 5 seconds...")
-                # time.sleep(5)  # Blocking pause; adjust if needed
-                mid_pause_done = True
-
-            if scroll >= total_scroll:
-                state = STATE_POST_SCROLL
-                last_time = time.ticks_ms()
-            else:
-                last_time = time.ticks_ms()
-
-        if (
-            state == STATE_POST_SCROLL
-            and time.ticks_ms() - last_time > HOLD_TIME * 1000
-        ):
-            state = STATE_BLANK_SCREEN
-            last_time = time.ticks_ms()
-
-        if (
-            state == STATE_BLANK_SCREEN
-            and time.ticks_ms() - last_time > BLANK_SCREEN_TIME * 1000
-        ):
-            set_background(black)
-            i75.update(graphics)
-            break
-
-        # Update brightness (in case it has changed dynamically)
+    message = msg.decode("utf-8")
+    try:
+        parsed = parse_mqtt_message(message)
+            
+        time_ms = time.ticks_ms()    
         black, red, green, blue, yellow, orange, white = initialize_colors(brightness)
 
-        # Set background color based on message content (customize keywords as desired)
-        """
-        if "Time" in MESSAGE:
-            set_background(yellow)
-        elif "News" in MESSAGE:
-            set_background(red)
-        elif "Weather" in MESSAGE:
-            set_background(blue)
-        elif "Air" in MESSAGE:
-            set_background(green)
-        else:
-            set_background(blue)
-        """
-        # Draw the multi-line text with an outline.
-        # The vertical starting point is computed so that the text scrolls upward.
-        draw_text_with_outline_multiline(
-            message_lines,
-            x=BUFFER_PIXELS + 1,
-            y=height - scroll + BUFFER_PIXELS,
-            scale=TEXT_SCALE,
-            text_color=white,
-            outline_color=black,
-            line_height=8,
-        )
-        i75.update(graphics)
-        time.sleep(SCROLL_DELAY)
-
+        print(parsed)
+    except Exception as e:
+        raise(e)
+        print(e)
+    
+        pass
+    i75.update(graphics)
+    time.sleep(SCROLL_DELAY)
 
 # --------------------- Async Helper Functions ---------------------
 async def heartbeat():
@@ -276,3 +356,4 @@ try:
 finally:
     client.close()
     asyncio.new_event_loop()
+
