@@ -1,0 +1,6 @@
+{
+  "micropico.syncFolder": "./src",
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingImports": "none"
+  }
+}
