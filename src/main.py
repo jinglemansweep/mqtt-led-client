@@ -37,6 +37,11 @@ graphics = i75.display
 width = i75.width
 height = i75.height
 
+
+def create_pen(color):
+    return graphics.create_pen(*hex_to_rgb(color))
+
+
 black = graphics.create_pen(0, 0, 0)
 white = graphics.create_pen(255, 255, 255)
 
@@ -53,6 +58,8 @@ def on_mqtt_message(topic, msg, retained):
     if not parsed:
         return
 
+    print(parsed)
+
     command = parsed.get("command")
     params = parsed.get("params")
     style = params.get("style", {})
@@ -67,10 +74,18 @@ def on_mqtt_message(topic, msg, retained):
         print("RECT")
         rect = params["rect"]
         if "color_fg" in style:
-            color = hex_to_rgb(style["color_fg"])
-            pen = graphics.create_pen(*color)
-            graphics.set_pen(pen)
+            graphics.set_pen(create_pen(style["color_fg"]))
         graphics.rectangle(rect["x"], rect["y"], rect["width"], rect["height"])
+
+    if command == "text":
+        print("TEXT")
+        rect = params["rect"]
+        content = params["content"]
+        if "color_fg" in style:
+            graphics.set_pen(create_pen(style["color_fg"]))
+        if "font_name" in style:
+            graphics.set_font(style["font_name"])
+        graphics.text(content, rect["x"], rect["y"])
 
     i75.update(graphics)
     time.sleep(FRAME_DELAY)
