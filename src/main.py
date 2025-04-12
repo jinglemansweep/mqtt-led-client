@@ -83,9 +83,10 @@ def on_mqtt_message(topic, msg, retained):
         content = params["content"]
         if "color_fg" in style:
             graphics.set_pen(create_pen(style["color_fg"]))
-        if "font_name" in style:
-            graphics.set_font(style["font_name"])
-        graphics.text(content, rect["x"], rect["y"])
+        if "font" in style:
+            graphics.set_font(style["font"])
+        scale = int(style.get("scale", 1))
+        graphics.text(content, rect["x"], rect["y"], scale=scale)
 
     i75.update(graphics)
     time.sleep(FRAME_DELAY)
